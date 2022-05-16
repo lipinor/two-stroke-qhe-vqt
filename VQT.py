@@ -3,6 +3,17 @@ import numpy as np
 import itertools
 import scipy
 
+from typing import Union
+import qiskit
+from qiskit.utils.backend_utils import is_aer_provider
+from qiskit.opflow import (
+    CircuitSampler,
+    ExpectationFactory,
+    CircuitStateFn,
+    StateFn,
+    I, X, Y, Z
+)
+
 from scipy.optimize import minimize
 
 def sigmoid(x):
@@ -14,8 +25,11 @@ def prob_dist(params):
     return np.vstack([1 - sigmoid(params), sigmoid(params)]).T
 
 class VQT:
-    def __init__(self, quantum_circuit, dev):
-        self.qnode = qml.QNode(quantum_circuit, dev)
+    def __init__(self, hamiltonian, ansatz, backend):
+        #self.qnode = qml.QNode(quantum_circuit, dev)
+        self.ansatz = ansatz
+        self.backend = backend
+        self.hamiltonian = hamiltonian
 
     def calculate_entropy(self, distribution):
         """ Calculates the entropy for a given distribution.
@@ -31,23 +45,59 @@ class VQT:
         """ Converts the list of parameters of the ansatz and
         split them into the distribution parameters and 
         the ansatz parameters.
-
         """
         # Separates the list of parameters
         dist_params = params[0:self.nr_qubits]
         ansatz_params = params[self.nr_qubits:]
 
         # Partitions the parameters into multiple lists
-        split = np.split(ansatz_params, self.depth)
-        rotation = []
-        for s in split:
-            rotation.append(np.split(s, n_rotations))
+        # split = np.split(ansatz_params, self.depth)
+        # rotation = []
+        # for s in split:
+        #     rotation.append(np.split(s, n_rotations))
 
-        ansatz_params = rotation
+        # ansatz_params = rotation
 
         return dist_params, ansatz_params
 
-    def exact_cost(self, params, ham_matrix, beta):
+    def sample_ansatz(self,
+        hamiltonian: qiskit.opflow.OperatorBase,
+        backend: Union[qiskit.providers.BaseBackend, qiskit.utils.QuantumInstance],
+        ansatz: qiskit.QuantumCircuit,
+        ansatz_params: list, 
+        ) -> float:
+        """Samples a hamiltonian given an ansatz, which is a Quantum circuit
+        and outputs the expected value given the hamiltonian.
+        Args:
+            hamiltonian (qiskit.opflow.OperatorBase): Hamiltonian that you want to get the
+            expected value.
+            backend (Union[qiskit.providers.BaseBackend, qiskit.utils.QuantumInstance]): Backend
+            that you want to run.
+            ansatz (qiskit.QuantumCircuit): Quantum circuit that you want to get the expectation
+            value.
+            ansatz_params (list): List of parameters of the ansatz.
+        Returns:
+            float: Expected value
+        """
+
+        if qiskit.utils.quantum_instance.QuantumInstance == type(backend):
+            sampler = CircuitSampler(backend, param_qobj=is_aer_provider(backend.backend))
+        else:
+            sampler = CircuitSampler(backend)
+
+        expectation = ExpectationFactory.build(operator=hamiltonian, backend=backend)
+        observable_meas = expectation.convert(StateFn(hamiltonian, is_measurement=True))
+
+        ansatz = ansatz.bind_parameters(ansatz_params)
+
+        ansatz_circuit_op = CircuitStateFn(ansatz)
+
+        expect_op = observable_meas.compose(ansatz_circuit_op).reduce()
+        sampled_expect_op = sampler.convert(expect_op)
+
+        return np.real(sampled_expect_op.eval())
+
+    def exact_cost(self, params, hamiltonian, beta):
         """ Calculates the exact cost of the ansatz.
         """
 
@@ -65,7 +115,12 @@ class VQT:
         # the calculated energy EV with the associated probability from the distribution
         cost = 0
         for i in s:
-            result = self.qnode(ansatz_params, ham_matrix, sample=[i[0]])
+            # result = self.qnode(ansatz_params, ham_matrix, sample=[i[0]])
+            result = self.sample_ansatz(self.hamiltonian,
+                                        self.backend, 
+                                        self.ansatz[i[0]],
+                                        ansatz_params
+                                        )
             for j in range(0, len(i)):
                 result = result * distribution[j][i[j]]
             cost += result
@@ -76,10 +131,10 @@ class VQT:
 
         return final_cost
     
-    def cost_execution(self, params, ham_matrix, beta, history):
+    def cost_execution(self, params, hamiltonian, beta, history):
         """ executes the cost step.
         """
-        cost = self.exact_cost(params, ham_matrix, beta)
+        cost = self.exact_cost(params, hamiltonian, beta)
 
         history.append(float(cost))
 
@@ -89,7 +144,7 @@ class VQT:
         self.iterations += 1
         return cost
 
-    def out_params(self, ham_matrix, beta, history, nr_qubits, depth, n_rotations: int=3, random_seed=42):
+    def out_params(self, hamiltonian, beta, history, nr_qubits, depth, n_rotations: int=3, random_seed=42):
         self.iterations = 0
         
         np.random.seed(random_seed)
@@ -104,7 +159,7 @@ class VQT:
         
         out = minimize(self.cost_execution, 
                         x0=params, 
-                        args=(ham_matrix, beta, history), 
+                        args=(hamiltonian, beta, history), 
                         method="COBYLA", 
                         options={"maxiter": 20}
                         )
