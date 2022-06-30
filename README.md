@@ -1,4 +1,6 @@
-# VQT-HeatEngine
+# VQT-QuantumHeatEngine
+
+This is the code for the paper Implementation of a two-stroke quantum heat engine with a collisional model ([arXiv:2203.13773v3](https://arxiv.org/abs/2203.13773))
 
 ## Instructions
 
